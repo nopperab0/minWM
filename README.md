@@ -375,3 +375,7 @@ For questions, suggestions, or collaboration, please open a GitHub issue or cont
 ## Acknowledgements
 
 minWM stands on the shoulders of giants. We thank the authors and maintainers of [HunyuanVideo 1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5), [HY-WorldPlay](https://github.com/Tencent-Hunyuan/HY-WorldPlay), [Wan 2.1](https://github.com/Wan-AI/Wan), [Causal-Forcing](https://github.com/thu-ml/Causal-Forcing), and [FastVideo](https://github.com/hao-ai-lab/FastVideo) for their open-source contributions, which made this framework possible.
+
+## FSDP2 OwnerMuon experiment
+
+This fork includes an opt-in matrix-owner Muon optimizer and full-step Stage-0 profiling. On a captured five-step Wan 1.3B comparison using four A100s, median step latency decreased from 4.524 s to 4.276 s (5.49%); peak memory was unchanged. See [results, implementation, limitations and Layer-Sharded Muon references](docs/owner_muon.md).

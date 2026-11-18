@@ -1,0 +1,67 @@
+{
+  "job_id": 24847964,
+  "state": "COMPLETED",
+  "exit_code": "0:0",
+  "provenance": "Transcribed from previously inspected CSF job output; not a raw profiler export. Measured source hashes remain in remote source.sha256.",
+  "gpus": "4 x A100 80GB",
+  "model": "Wan2.1 1.3B",
+  "stage": 0,
+  "sp_size": 4,
+  "warmup_steps": 3,
+  "captured_steps": 5,
+  "baseline_step_ms": [
+    4545.18359375,
+    4546.08251953125,
+    4524.48486328125,
+    4517.33642578125,
+    4511.19775390625
+  ],
+  "owner_step_ms": [
+    4349.46533203125,
+    4284.078125,
+    4276.3212890625,
+    4267.2783203125,
+    4276.1279296875
+  ],
+  "baseline_median_ms": 4524.48486328125,
+  "owner_median_ms": 4276.3212890625,
+  "ns_gpu_compute_union_ms": {
+    "baseline": 390.8,
+    "owner": 101.1
+  },
+  "optimizer_ms_rounded": {
+    "baseline": 1097,
+    "owner": 846.1
+  },
+  "peak_allocated_gib": {
+    "baseline": 16.51,
+    "owner": 16.51
+  },
+  "peak_reserved_gib": {
+    "baseline": 18.86,
+    "owner": 18.86
+  },
+  "nccl_union_ms": {
+    "baseline": 568.9,
+    "owner": 644.7
+  },
+  "nccl_overlap_compute_ms": {
+    "baseline": 73.43,
+    "owner": 78.46
+  },
+  "nccl_without_local_compute_ms": {
+    "baseline": 498.8,
+    "owner": 566.2
+  },
+  "gpu_idle_ms": {
+    "baseline": 747.8,
+    "owner": 732.3
+  },
+  "equivalence": {
+    "status": "PASS",
+    "steps": 3,
+    "max_abs_error": 0,
+    "backend": "nccl",
+    "ranks": 4
+  }
+}
