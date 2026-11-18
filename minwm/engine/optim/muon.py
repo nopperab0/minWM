@@ -2,6 +2,8 @@ import math
 
 import torch
 
+from .muon_nvtx import muon_range
+
 try:
     from torch.distributed.tensor import DTensor
     from torch.distributed.tensor.placement_types import (
@@ -29,32 +31,43 @@ def zeropower_via_newtonschulz5(G, steps=5):
     """
     if isinstance(G, DTensor):
         device_mesh = G.device_mesh
-        G = G.full_tensor()
+        with muon_range("Muon/full_tensor"):
+            G = G.full_tensor()
     else:
         device_mesh = None
 
+    with muon_range("Muon/Newton_Schulz"):
+        X = _newton_schulz_matrix(G, steps)
+
+    if device_mesh is not None:
+        with muon_range("Muon/from_local"):
+            return DTensor.from_local(X, device_mesh)
+    return X
+
+
+def _newton_schulz_matrix(G, steps):
     assert len(G.shape) >= 2
     a, b, c = (3.4445, -4.7750, 2.0315)
     X = G
     if G.size(-2) > G.size(-1):
         X = X.mT
     # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    with muon_range("Muon/NS/normalization"):
+        X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
     # Perform the NS iterations
-    for _ in range(steps):
-        A = X @ X.T
-        B = (
-            b * A + c * A @ A
-        )  # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
-        X = a * X + B @ X
+    for iteration in range(steps):
+        with muon_range(f"Muon/NS/iteration_{iteration}"):
+            with muon_range("Muon/NS/GEMM_XXt"):
+                A = X @ X.T
+            with muon_range("Muon/NS/GEMM_AA_polynomial"):
+                B = b * A + c * A @ A
+            with muon_range("Muon/NS/GEMM_BX_update"):
+                X = a * X + B @ X
 
     if G.size(-2) > G.size(-1):
         X = X.mT
 
-    if device_mesh != None:
-        return DTensor.from_local(X, device_mesh)
-    else:
-        return X
+    return X
 
 
 class Muon(torch.optim.Optimizer):
@@ -132,72 +145,77 @@ class Muon(torch.optim.Optimizer):
 
             lr = group["lr"]
             weight_decay = group["weight_decay"]
-            momentum = group["momentum"]
 
             # generate weight updates in distributed fashion
-            for p in params:
-                # sanity check
-                g = p.grad
-                if g is None:
-                    continue
-                if g.ndim > 2:
-                    g = g.view(g.size(0), -1)
-                assert g is not None
-
-                # calc update
-                state = self.state[p]
-                if "momentum_buffer" not in state:
-                    state["momentum_buffer"] = torch.zeros_like(g)
-                buf = state["momentum_buffer"]
-                buf.mul_(momentum).add_(g)
-                if group["nesterov"]:
-                    g = g.add(buf, alpha=momentum)
-                else:
-                    g = buf
-                g = g.bfloat16()
-                u = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
+            for p, u in self._matrix_updates(params, group):
 
                 # scale update
                 adjusted_lr = self.adjust_lr_for_muon(lr, p.shape)
 
                 # apply weight decay
-                p.data.mul_(1 - lr * weight_decay)
+                with muon_range("Muon/weight_decay"):
+                    p.data.mul_(1 - lr * weight_decay)
 
                 # apply update
-                p.data.add_(u.view(p.shape), alpha=-adjusted_lr)
+                with muon_range("Muon/parameter_update"):
+                    p.data.add_(u.view(p.shape), alpha=-adjusted_lr)
 
             ############################
             #       AdamW backup       #
             ############################
 
             params = [p for p in group["params"] if not self.state[p]["use_muon"]]
-            lr = group["lr"]
-            beta1, beta2 = group["adamw_betas"]
-            eps = group["adamw_eps"]
-            weight_decay = group["weight_decay"]
-
-            for p in params:
-                g = p.grad
-                if g is None:
-                    continue
-                state = self.state[p]
-                if "step" not in state:
-                    state["step"] = 0
-                    state["moment1"] = torch.zeros_like(g)
-                    state["moment2"] = torch.zeros_like(g)
-                state["step"] += 1
-                step = state["step"]
-                buf1 = state["moment1"]
-                buf2 = state["moment2"]
-                buf1.lerp_(g, 1 - beta1)
-                buf2.lerp_(g.square(), 1 - beta2)
-
-                g = buf1 / (eps + buf2.sqrt())
-
-                bias_correction1 = 1 - beta1**step
-                bias_correction2 = 1 - beta2**step
-                scale = bias_correction1 / bias_correction2**0.5
-                p.data.mul_(1 - lr * weight_decay)
-                p.data.add_(g, alpha=-lr / scale)
+            with muon_range("Muon/AdamW_fallback"):
+                self._adamw_updates(params, group)
 
         return loss
+
+    def _momentum_update(self, p, group):
+        with muon_range("Muon/momentum_nesterov"):
+            g = p.grad
+            if g.ndim > 2:
+                g = g.view(g.size(0), -1)
+            state = self.state[p]
+            if "momentum_buffer" not in state:
+                state["momentum_buffer"] = torch.zeros_like(g)
+            buf = state["momentum_buffer"]
+            buf.mul_(group["momentum"]).add_(g)
+            g = g.add(buf, alpha=group["momentum"]) if group["nesterov"] else buf
+            return g.bfloat16()
+
+    def _matrix_updates(self, params, group):
+        for p in params:
+            if p.grad is not None:
+                g = self._momentum_update(p, group)
+                with muon_range("Muon/orthogonalize"):
+                    u = zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
+                yield p, u
+
+    def _adamw_updates(self, params, group):
+        lr = group["lr"]
+        beta1, beta2 = group["adamw_betas"]
+        eps = group["adamw_eps"]
+        weight_decay = group["weight_decay"]
+        for p in params:
+            g = p.grad
+            if g is None:
+                continue
+            state = self.state[p]
+            if "step" not in state:
+                state["step"] = 0
+                state["moment1"] = torch.zeros_like(g)
+                state["moment2"] = torch.zeros_like(g)
+            state["step"] += 1
+            step = state["step"]
+            buf1 = state["moment1"]
+            buf2 = state["moment2"]
+            buf1.lerp_(g, 1 - beta1)
+            buf2.lerp_(g.square(), 1 - beta2)
+
+            g = buf1 / (eps + buf2.sqrt())
+
+            bias_correction1 = 1 - beta1**step
+            bias_correction2 = 1 - beta2**step
+            scale = bias_correction1 / bias_correction2**0.5
+            p.data.mul_(1 - lr * weight_decay)
+            p.data.add_(g, alpha=-lr / scale)
