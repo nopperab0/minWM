@@ -1,5 +1,45 @@
 # minWM: The First Full-Stack Open-Source World Model Framework
 
+## This fork: FSDP2 OwnerMuon
+
+This fork adds **OwnerMuon**, a matrix-owner adaptation of Layer-Sharded Muon for minWM's one-dimensional FSDP2 layout, plus full-step NVTX / Nsight Systems profiling. The upstream framework is introduced below.
+
+### Profiling results
+
+**Wan2.1 1.3B · Stage-0 · 4 × A100 80GB · SP=4 · BF16**. Original Muon versus OwnerMuon; three warm-up steps followed by five complete captured steps per variant.
+
+| Metric | Original Muon | OwnerMuon | Change |
+|---|---:|---:|---:|
+| Median training step | 4524.5 ms | 4276.3 ms | **−5.49%** |
+| Optimizer step | 1097 ms | 846.1 ms | **−22.9%** |
+| NS GPU compute union / step | 390.8 ms | 101.1 ms | **−74.1%** |
+| Backward including FSDP | 2487 ms | 2488 ms | Approximately unchanged |
+| Peak allocated memory | 16.51 GiB | 16.51 GiB | Unchanged |
+
+The measured step reduction corresponds to **5.80% higher throughput**. Backward remains the largest phase. NCCL kernel activity increased; the result supports reducing duplicated NS computation, not a claim of reduced communication or peak memory.
+
+These are short **Nsight-captured** measurements from completed CSF3 job `24847964`, not an unprofiled throughput or convergence benchmark. Phase and kernel metrics use different rank aggregations and are not additive. Results were transcribed from the inspected job output; raw traces remain on CSF3. The publication isolates optimizer/profiling changes from the measured workspace; see the full report for source-provenance limits. Stage-1 and 8B models were not measured.
+
+### What changed and why
+
+In the original DTensor Muon path, every rank reconstructs the full gradient using `full_tensor()` and performs the same full-matrix Newton–Schulz (NS) computation. OwnerMuon assigns each matrix to one GPU:
+
+```text
+FSDP gradient shards → gather to matrix owner → one full-matrix NS
+                    → scatter update to original shards → parameter update
+```
+
+- **Balance matrix ownership:** greedily distribute matrices by estimated NS cost; process windows with at most one matrix per owner.
+- **Compute once per matrix:** only the owner reconstructs and orthogonalizes the full matrix. Different owners handle independent matrices.
+- **Preserve the optimizer rule:** retain sharded momentum, Nesterov, NS coefficients/iterations, learning-rate scaling, weight decay and the AdamW fallback for vectors/scalars.
+- **Preserve shard layout:** pad uneven shards for gather/scatter, trim the returned update and restore the original DTensor layout.
+
+The core owner / single-NS / return-shards mechanism follows [Megatron-LM LayerShardedMuon](https://github.com/NVIDIA/Megatron-LM/blob/bfab98f4a3ca7bfab11f7fee7672e95be54a70b6/megatron/core/optimizer/layer_sharded_muon.py). This is a narrower implementation: **1-D FSDP2, per-matrix gather/scatter**, without Megatron's multi-axis all-to-all routing, batched NS, optional SYRK or concurrent parameter-group streams. It does not implement the pipelining proposal discussed in [issue #6719](https://github.com/NVIDIA/Megatron-LM/issues/6719).
+
+**[Full profiling report, implementation details and reproduction](docs/owner_muon.md)** · [Measurement record](docs/experiments/owner_muon_24847964.json) · [OwnerMuon source](minwm/engine/optim/owner_muon.py)
+
+---
+
 >  ***A full-stack framework and tutorial for newcomers, rather than a specific model.***
 
 <p align="center">
@@ -375,7 +415,3 @@ For questions, suggestions, or collaboration, please open a GitHub issue or cont
 ## Acknowledgements
 
 minWM stands on the shoulders of giants. We thank the authors and maintainers of [HunyuanVideo 1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5), [HY-WorldPlay](https://github.com/Tencent-Hunyuan/HY-WorldPlay), [Wan 2.1](https://github.com/Wan-AI/Wan), [Causal-Forcing](https://github.com/thu-ml/Causal-Forcing), and [FastVideo](https://github.com/hao-ai-lab/FastVideo) for their open-source contributions, which made this framework possible.
-
-## FSDP2 OwnerMuon experiment
-
-This fork includes an opt-in matrix-owner Muon optimizer and full-step Stage-0 profiling. On a captured five-step Wan 1.3B comparison using four A100s, median step latency decreased from 4.524 s to 4.276 s (5.49%); peak memory was unchanged. See [results, implementation, limitations and Layer-Sharded Muon references](docs/owner_muon.md).
